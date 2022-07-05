@@ -1,0 +1,241 @@
+#!/usr/bin/env python3
+
+import boto3
+import os
+import sys
+import configparser
+import argparse
+
+BUCKET = ''
+
+
+def client_from_config() -> boto3.Session.client:
+    """
+    A method to create boto3 client from given configuration
+    :return: client with configuration
+    """
+    try:
+        # trying to open cofiguration file
+        cfg_file = open(f'{os.environ["HOME"].replace(chr(92), "/")}/.config/cloudphoto/cloudphotorc')
+    except OSError:
+        print("Не удалось прочитать конфигурационный файл", file=sys.stderr)
+        sys.exit(os.EX_CONFIG)
+
+    cfg = configparser.ConfigParser()   # creating parser to get configuration info
+    cfg.read_file(cfg_file)
+    try:
+        bucket = cfg['default']['bucket']
+        aws_access_key_id = cfg['default']['aws_access_key_id']
+        aws_secret_access_key = cfg['default']['aws_secret_access_key']
+        region = cfg['default']['region']
+        endpoint_url = cfg['default']['endpoint_url']
+    except KeyError as err:
+        print(f"Не найден параметр {err}")
+        sys.exit(os.EX_CONFIG)
+
+    session = boto3.session.Session()
+    # creating boto3 client
+    client = session.client(
+        aws_access_key_id=aws_access_key_id,
+        aws_secret_access_key=aws_secret_access_key,
+        region_name=region,
+        service_name='s3',
+        endpoint_url=endpoint_url
+    )
+    # initializing BUCKET with bucket info from config
+    global BUCKET
+    BUCKET = bucket
+
+    return client
+
+
+def my_parser() -> argparse.ArgumentParser:
+    """
+    A method to create parser for CLI
+    :return: parser with made commands
+    """
+    parser = argparse.ArgumentParser()  # creating empty parser
+    sub_parser = parser.add_subparsers(dest='command', required=True)
+    # adding new commands
+    upload_command = sub_parser.add_parser('upload', help='Uploading photos')
+    upload_command.add_argument('-a', '--album', type=str, dest='album', required=True)    # adding argument to command
+    upload_command.add_argument('-p', '--path', type=str, dest='path', required=True)
+
+    download_command = sub_parser.add_parser('download', help='Downloading photos')
+    download_command.add_argument('-a', '--album', type=str, dest='album', required=True)
+    download_command.add_argument('-p', '--path', type=str, dest='path', required=True)
+
+    list_albums_command = sub_parser.add_parser('list-albums', help='Showing all albums')
+
+    list_photos_command = sub_parser.add_parser('list-photos', help='Showing all photos from album')
+    list_photos_command.add_argument('-a', '--album', type=str, dest='album', required=True)
+
+    generate_site_command = sub_parser.add_parser('generate-site', help='Generating website with albums')
+
+    return parser
+
+
+def upload(album: str, path: str) -> None:
+    """
+    A method to upload photos from given path to given album
+    :param album: album name in Bucket
+    :param path: path with directory containing photos
+    :return: None
+    """
+    # checking if path exists and it is directiry
+    if not os.path.exists(path) or not os.path.isdir(path):
+        print(f'No such path or path is not directory: {path}')
+        return
+    files = os.listdir(path)    # getting all files from path
+    pictures = list(filter(lambda file: file.endswith(('.jpg', '.jpeg')), files))     # getting only photos
+    for picture in pictures:
+        # uploading photos by their full path
+        s3.upload_file(Bucket=BUCKET, Key=f'{album}/{picture}', Filename=path + '/' + picture)
+    if len(pictures) == 0:
+        # if path is empty - creating empty folder
+        s3.put_object(Bucket=BUCKET, Key=f'{album}/')
+    print('Successfully uploaded')
+
+
+def download(album: str, path: str) -> None:
+    """
+    A method to download photos from given album to given path
+    :param album: album name in Bucket
+    :param path: a path where photos will be downloaded
+    :return: None
+    """
+    response = s3.list_objects(Bucket=BUCKET, Prefix=album)
+    # checking if album exists
+    if 'Contents' not in response:
+        print(f'No such album: {album}')
+        return
+    name = response['Contents'][0]['Key']
+    if name[:name.rfind('/')] != album:
+        print(f'No such album: {album}')
+        return
+    # getting all photos from album
+    pictures = list(map(lambda elem: elem['Key'], s3.list_objects(Bucket=BUCKET, Prefix=album)['Contents']))
+    if not os.path.exists(path) or not os.path.isdir(path):
+        print(f'No such path or path is not directory: {path}')
+        return
+    for picture in pictures:
+        # downloading photos
+        s3.download_file(BUCKET, picture, path + picture[picture.find('/'):])
+    print('Downloaded successfully')
+
+
+def list_albums() -> list:
+    """
+    A method to get all albums from Bucket
+    :return: list containig albums
+    """
+    # getting all photos
+    response = filter(lambda elem: len(elem['Key']) > 5, s3.list_objects_v2(Bucket=BUCKET)['Contents'])
+    pictures_info = filter(lambda res: res["Key"].endswith(('.jpg', '.jpeg')), response)
+    albums_set = set()
+    for picture in pictures_info:
+        name = picture['Key']
+        albums_set.add(name[:name.rfind('/')])
+    print('Albums:', ', '.join(list(albums_set)))
+    return list(albums_set)
+
+
+def list_photos(album: str) -> list:
+    """
+    A method to get all photos from given album
+    :param album: album name in Bucket
+    :return: photos list
+    """
+    response = s3.list_objects(Bucket=BUCKET, Prefix=album)
+    if 'Contents' not in response:
+        print(f'No such album: {album}')
+        return []
+    name = response['Contents'][0]['Key']
+    if name[:name.rfind('/')] != album:
+        print(f'No such album: {album}')
+        return []
+    pictures = list(map(lambda elem: elem['Key'][elem['Key'].rfind('/') + 1:], response['Contents']))
+    print(f'Pictures from "{album}/": ', ', '.join(pictures))
+    return pictures
+
+
+def generate_site() -> None:
+    """
+    A method to generate website for all albums
+    :return: None
+    """
+    # index page template
+    first_page = f"""<!doctype html>
+    <html>
+        <head>
+            <title>PhotoArchive</title>
+        </head>
+    <body>
+        <h1>PhotoArchive</h1>
+        <ul>
+        </ul>
+    </body>
+    """
+    # album`s pages template
+    other_page = """<!doctype html>
+    <html>
+        <head>
+            <link rel="stylesheet" type="text/css" href="https://cdnjs.cloudflare.com/ajax/libs/galleria/1.6.1/themes/classic/galleria.classic.min.css" />
+            <style>
+                .galleria{ width: 960px; height: 540px; background: #000 }
+            </style>
+            <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.6.0/jquery.min.js"></script>
+            <script src="https://cdnjs.cloudflare.com/ajax/libs/galleria/1.6.1/galleria.min.js"></script>
+            <script src="https://cdnjs.cloudflare.com/ajax/libs/galleria/1.6.1/themes/classic/galleria.classic.min.js"></script>
+        </head>
+        <body>
+            <div class="galleria">
+            </div>
+            <script>
+                (function() {
+                    Galleria.run('.galleria');
+                }());
+            </script>
+        </body>
+    </html>
+    """
+    for album in list_albums():
+        # adding page for every album in Bucket
+        link = f'\n\t\t\t<li><a href="website/{album}.html">{album}</a></li>'
+        first_page = first_page[:first_page.find('<ul>') + 4] + link + first_page[first_page.find('<ul>') + 4:]
+        pictures = list_photos(album)
+        album_page = other_page[:]
+        for picture in pictures:
+            # adding links for every photo in album
+            photo_link = f'\n\t\t\t\t<img src="https://storage.yandexcloud.net/{BUCKET}/{album}/{picture}">'
+            album_page = album_page[:album_page.find('class="galleria">') + 17] + photo_link + album_page[album_page.find('class="galleria">') + 17:]
+        s3.put_object(Bucket=BUCKET, Key=f'website/{album}.html', Body=album_page)
+    s3.put_object(Bucket=BUCKET, Key='index.html', Body=first_page)
+    s3.put_bucket_acl(Bucket=BUCKET, ACL='public-read')
+    s3.put_bucket_website(Bucket=BUCKET, WebsiteConfiguration={'IndexDocument': {'Suffix': 'index.html'}})
+    print(f'https://{BUCKET}.website.yandexcloud.net')
+
+
+# dictionary to call functions by their names in argparser
+func_name = {
+    'upload': upload,
+    'download': download,
+    'list-albums': list_albums,
+    'list-photos': list_photos,
+    'generate-site': generate_site
+}
+
+
+if __name__ == "__main__":
+    s3 = client_from_config()
+    arg_parser = my_parser()
+    args = arg_parser.parse_args()
+    # commands with no arguments
+    if args.command == 'list-albums' or args.command == 'generate-site':
+        func_name[args.command]()
+    # command with one argument
+    elif args.command == 'list-photos':
+        func_name[args.command](args.album)
+    # commands with two arguments
+    else:
+        func_name[args.command](args.album, args.path)
